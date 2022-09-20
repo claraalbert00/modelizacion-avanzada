@@ -1,0 +1,243 @@
+---
+title: "Pràctica 2"
+author: "Grup 3 - Clara Albert, Enric Sintes, Joel Baltasar, Sergi Orozco"
+date: "Maig del 2021"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importació de les dades
+
+```{r}
+library(haven)
+datos=read_sas("P2_baseline.sas7bdat", NULL)
+```
+
+## Qualitat de les dades
+
+Veiem l'estructura de les dades.
+```{r}
+str(datos)
+```
+
+Veiem que les dades ja tenen l'estructura que ens interessa. Aquelles que tenen dues categòries ja estàn factoritzades. Una vegada comprovat que el seu format és el correcte, realitzarem un resum estadístic per veure si hi ha alguna dada que no està preparada per l'anàlisi.
+
+```{r}
+summary(datos)
+```
+
+En les variables categòriques veiem que no hi ha cap discrepància, ja que tots els valors són 0 o 1. Per a les variables continues, veiem un outlier en l'edat del donant, ja que el mínim és de 2 anys. Tot i això, no ens interfereix al nostre estudi que realitzarem. 
+
+**Missing values**
+
+```{r}
+apply(is.na(datos),2,sum)
+```
+
+Veiem que no hi ha cap dada amb missing values.
+
+## Comparativa dades basals
+
+Per comparar els dos grups utilitzarem la funció compareGroups on els descrptius que utilitzarem seran: 
+
+- Per a variables categòriques: N i percentatge
+
+- Per a variables numèriques: mediana i primer i tercer quartil
+
+A més a més, afegirem la diferència mitjana estandaritzada per veure si les dades entre els dos grups estàn molt desequilibrades (aquest valor és superior a 0.2).
+
+```{r}
+library(dplyr)
+library(tableone)
+
+cols.to.factor <- sapply(datos, function(col) length(unique(col)) < 3); head(cols.to.factor)
+datos[cols.to.factor] <- lapply(datos[ cols.to.factor] , factor)
+
+vars = colnames(datos); vars = vars[-1]; vars
+continues=names(datos[cols.to.factor==FALSE])
+
+## Construct a table
+tabUnmatched <- CreateTableOne(vars = vars, strata = "treat", data = datos, test = TRUE)
+
+## Show table with SMD
+print(tabUnmatched, nonnormal = continues,smd = TRUE) #Variables continues amb median[IQR]
+```
+
+Les xifres de les variables FIN_INDIC_HCC, FIN_INDIC_Cirr, FIN_INDIC_Other, MELDSCORE, Gender_Rec, EDAD_REC_TX , LIQUIDOPRESERV_UW_IGL1,  LIQUIDOPRESERV_HTK,   LIQUIDOPRESERV_CELSIOR, TmIsqCalTotAbd i TmIsqCalFxAbd són les més desproporcionades respecte a les restants.
+
+```{r}
+library(survey)
+
+#propensity score model
+psmodel <- glm(treat ~ ., data=datos, family=binomial(link="logit"))
+
+# valor del propensity score per cada individu. 
+ps <- predict(psmodel, type="response")
+
+#Pesos per cada individu
+weight<-ifelse(datos$treat==1,(1/ps),(1/(1-ps)))
+
+#Apliquem els pesos a les dades
+weightdata<-svydesign(ids=~1,data=datos,weights=weight)
+weightedtable<-svyCreateTableOne(vars=vars,strata="treat", data=weightdata,test=FALSE)
+print(weightedtable,smd=TRUE)
+```
+
+Amb el model amb totes les variables no aconseguim unes dades balancejades, per tant provarem amb altres models. 
+Partint d'un model amb totes les variables que tenien un SMD major que 0.2 al model complet hem construint el següent model fent algunes modificacions perquè obtinguem totes les variables balacejades. 
+
+```{r}
+psmodel2 <- glm(treat ~ EDAD_DON + TmIsqCalTotAbd + sqrt(TmIsqCalFxAbd) + LIQUIDOPRESERV_UW_IGL1 + LIQUIDOPRESERV_HTK + EDAD_REC_TX + Gender_Rec + FIN_INDIC_Cirr + Volume + TIEMPOISQUEMIAFR_A_RETH, data=datos, family=binomial(link="logit"))
+
+# valor del propensity score per cada individu.
+datos$ps2 <- predict(psmodel2, type="response")
+
+#Caluclem les paticipacions de les variables
+part <- sum(datos$treat==1)/length(datos$treat)
+
+#Pesos per cada individu
+datos$weight2 <- ifelse(datos$treat==1,(1/datos$ps2)*part,(1/(1-datos$ps2))*(1-part))
+
+#Apliquem els pesos a les dades
+weightdata2 <-svydesign(ids=~1,data=datos,weights=datos$weight2)
+weightedtable2<-svyCreateTableOne(vars=vars,strata="treat", data=weightdata2,test=FALSE)
+print(weightedtable2,smd=TRUE)
+```
+
+
+## Part 2 - Anàlisis amb inverse of probability of treatment weighting
+
+1- **Descripció de la supervivència de l’empelt i dels pacients**
+
+```{r}
+library(haven)
+outcomes <- read_sas("outcomes.sas7bdat", NULL)
+datos2 <- merge(datos, outcomes, by="PatNo")
+```
+
+```{r}
+library(survival)
+
+
+km.model <- survfit(Surv(DeathTm,DeathYN)~treat, type="kaplan-meier", data=datos2)  
+
+km.model2 <- survfit(Surv(GraftNotFxTm, GraftNotFxYN)~treat, type="kaplan-meier", data=datos2) 
+
+
+{par(mfrow=c(1,2))
+plot(km.model,conf.int=F,xlab="Time (months)",ylab="Patient survival",main="Kaplan-Meier", col=c("red", "blue"))
+legend("bottomright", c("SRR", "NRP"), col=c("red", "blue"), lty=c(1,1))
+
+plot(km.model2,conf.int=F,xlab="Time (months)",ylab="Graft survival",main="Kaplan-Meier", col=c("red", "blue"))
+legend("bottomright", c("SRR", "NRP"), col=c("red", "blue"), lty=c(1,1))
+}
+```
+
+**Ho podriem fer amb IPTW?**
+
+Si que es podria fer la representació de la funció de supervivencia amb IPTW, ja que tenim uns pesos per a cada individu que els podriem afegir a la base de dades i tindriem unes noves dades per poder aplicar el mètode de Kaplan-Meier. 
+
+
+2- **Anàlisi inferencial cru i ajustat de comparació de riscs en anàlisi de supervivència**
+
+Calculariem el log rank per veure diferències entre grups i saber si són o no iguals.
+```{r}
+surv_diff <- survdiff(Surv(DeathTm,DeathYN)~treat, data = datos2)
+surv_diff
+```
+
+
+Per calcular els riscos del model utilitzarem la funció coxph per calcular el Hazard Ratio
+```{r}
+cox.mod<-coxph(Surv(DeathTm,DeathYN)~treat,data=datos2, weights=weight2, method="breslow") 
+summary(cox.mod) 
+```
+
+3- **Comparació una variable continua gaussiana entre els dos grups**
+
+Podem utilitzar la mitjana i la desviació, ja que sabem que les dades están distribuides de forma normal. Per fer la comparació entre grups sense ajust emprariem tests paramètrics; com t-student, test ANOVA etc. I amb ajust utilitzariem el test weighted t-test ja que tindriem en compte que les dades estàn sota IPTW.
+
+4 - **Comparació una variable continua no-gaussiana entre els dos grups**
+
+En aquest cas, els estadístics descriptius són la mediana i el rang interquartilic (o el primer i tercer quartil), ja que les dades no són gaussianes. Els test que podriem usar seria el de Wilcoxon per a mostres relacionades i veure diferencies entre variables.
+
+5 - **Comparació variable binaria entre els dos grups**
+
+Per comprar variables binaries entre dos grups sense ajust podriem utilitzar el test de Fisher i amb ajust podriem utilitzar la prova de chi-quadrat. Els descriptius per a aquest tipus de variable són les freqüències i el percentatge d'aquestes.
+
+
+## Part 3 - Anàlisis amb propensity score matching (PSM)
+
+```{r}
+library(Matching)
+
+listMatch <- Match(Tr = datos2$treat==1, X=log(datos2$ps2/(1-datos2$ps2)),
+ M = 1,
+ caliper = 0.2,
+ replace = FALSE,
+ ties = TRUE,
+ version = "fast")
+
+
+datosMatched <- datos2[unlist(listMatch[c("index.treated","index.control")]), ]
+
+tabMatched <- CreateTableOne(vars = vars, strata = "treat", data = datosMatched, test = FALSE)
+print(tabMatched, smd = TRUE)
+##No funciona como toca, hay qe cambiar algo
+```
+
+1- **Descripció de la supervivència de l'empelt i dels pacients**
+
+```{r}
+##
+##Surten les corbes igual que l'apartat anterior. Hi ha canviar algo!! 
+##
+
+km.model <- survfit(Surv(DeathTm,DeathYN)~treat, type="kaplan-meier", data=datosMatched)  
+
+km.model2 <- survfit(Surv(GraftNotFxTm, GraftNotFxYN)~treat, type="kaplan-meier", data=datosMatched) 
+
+
+{par(mfrow=c(1,2))
+plot(km.model,conf.int=F,xlab="Time (months)",ylab="Patient survival",main="Kaplan-Meier", col=c("red", "blue"))
+legend("bottomright", c("SRR", "NRP"), col=c("red", "blue"), lty=c(1,1))
+
+plot(km.model2,conf.int=F,xlab="Time (months)",ylab="Graft survival",main="Kaplan-Meier", col=c("red", "blue"))
+legend("bottomright", c("SRR", "NRP"), col=c("red", "blue"), lty=c(1,1))
+}
+```
+
+**Diferència amb l'anàlisi IPTW**
+
+Els dos mètodes donen resultats molt semblants, tant com en el SMD com en els gràfics de la funció de supervivència. Tot i això, com les variables del model les introduïm per a que les SMD del IPTW siguin menors de 0.2 i utilitzem aquest mateix model per al PSM, les diferències si que són més petites amb el primer mètode. 
+
+2- **Anàlisi inferencial de comparació de riscs en anàlisi de supervivència**
+
+No faria cap ajust adicional, ja que les dades les hem ajustat a partir del matching i ja hem minimitzat la diferència entre els grups.  
+
+
+3- **Com compararíeu una variable continua gaussiana entre els dos grups. Quins estadístics descriptius usaríeu per grup. Si coneixeu més d’una opció inferencial especifiqueu. Té sentit fer cap ajust addicional després del matching?**
+
+Podem utilitzar la mitjana i la desviació, ja que sabem que les dades están distribuides de forma normal. Per fer la comparació entre grups sense ajust emprariem tests paramètrics aparellats, com paired t-test. Ja que les dades finals contemplen l'aparallament, no té sentit fer cap ajust addicional
+
+
+4- **Com compararíeu una variable continua no-gaussiana entre els dos grups. Quins estadístics descriptius usaríeu per grup. Si coneixeu més d’una opció inferencial especifiqueu. Té sentit fer cap ajust addicional després del matching?**
+
+En aquest cas, els estadístics descriptius són la mediana i el rang interquartilic (o el primer i tercer quartil), ja que les dades no són gaussianes. Els test que podriem usar seria el de Wilcoxon per a mostres relacionades i veure diferencies entre variables. Tal com passa amb les variables no-gaussianes, no té sentit cap ajust addicional.
+
+
+5- **Com compararíeu una variable binaria entre els dos grups. Quins estadístics descriptius usaríeu per grup. Si coneixeu més d’una opció inferencial especifiqueu. Té sentit fer cap ajust addicional després del matching?**
+
+Per comprar variables binaries entre dos grups sense ajust podriem utilitzar el test de Fisher o inclús el test de chi-quadrat. Els descriptius per a aquest tipus de variable són les freqüències i el percentatge d'aquestes. 
+
+
+6- **Compareu la interpretació dels anàlisis de la pràctica 1 (regressió logística condicional) amb l’anàlisi IPTW i PSM de la pràctica 2. Caldria haver fet per la pràctica 2 alguna mena d’anàlisi de dades dependents o estratificat addicional? Perquè?**
+
+La pràctica 1 estavem fent l'aparallament de les dades de forma manual a partir d'un indicador MatchCC i calculavem la seva recta de regressió lineal condicionant a aquesta variable. En aquesta pràctica, l'objectiu era determinar uns pesos i a partir d'aquests minimitzar la diferència entre els grups. Al utilitzar els pesos no es necessari un anàlisi de dades dependents o estratificar, ja que les diferències es minimitzen amb aquests pesos.
+
+

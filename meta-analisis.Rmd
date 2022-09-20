@@ -1,0 +1,215 @@
+---
+title: "Pràctica 3 Modelització Avançada"
+author: "Clara Albert - Joel Baltasar - Enric Sintes - Sergi Orozco"
+date: "20/5/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importació de les dades
+
+```{r}
+library(readxl)
+datos <- read_excel("~/GEA/3er/Modelització Avançada/Practica3.xlsx")
+View(datos)
+```
+
+
+## Qualitat de les dades
+
+Veiem l'estructura de les dades.
+```{r}
+str(datos)
+```
+
+**Factorització de les dades**
+```{r}
+cols.to.factor <- sapply(datos, function(col) length(unique(col)) < 4); head(cols.to.factor)
+datos[cols.to.factor] <- lapply(datos[ cols.to.factor] , factor)
+
+str(datos)
+```
+
+Fem un resum estadístic per veure si hi ha alguna dada que no està preparada per l'anàlisi.
+
+```{r}
+summary(datos)
+```
+
+**Missing values**
+
+```{r}
+apply(is.na(datos),2,sum)
+```
+
+La dada inr_ing té 37 missings i la variable hb_ing en té 417.
+
+## Filtració dades
+
+```{r}
+table(datos$study_num, datos$treatment)
+```
+
+Veiem que els estudis 4,5 i 8 no tenen dades pels 2 gups de tractament i per tant els podem esborrar.
+
+```{r}
+datos = datos[!(datos$study_num == 4 | datos$study_num == 5 | datos$study_num == 8), ]
+dim(datos)
+table(datos$study_num, datos$treatment)
+```
+
+## Anàlisi comparativa dades basals
+
+Nomès realitzarem l'anàlisi de les dades basals, per tant les seleccionem i fem una taula per comparar aquestes dades a partir dels dos grups de tractament. 
+
+```{r}
+library(dplyr)
+library(tableone)
+
+
+vars = colnames(datos); vars = vars[c(4,5,6,7,8,9)]
+continues=names(datos[cols.to.factor==FALSE])
+
+## Construct a table
+tabUnmatched <- CreateTableOne(vars = vars, strata = "treatment", data = datos, test = TRUE)
+
+## Show table with SMD
+print(tabUnmatched, nonnormal = continues,smd = TRUE)
+```
+
+```{r}
+## Construct a table
+tabUnmatched <- CreateTableOne(vars = vars, strata = c("study_num","treatment"), data = datos, test = TRUE)
+
+## Show table with SMD
+print(tabUnmatched, nonnormal = continues,smd = TRUE)
+```
+
+Quan comparem els dos grups globalment, les dades basals són gairebé totes comparables entre elles, ja que la seva diferència mitjana estadaritzada és més petita que 0.2 en la majoria dels casos. Quan afegim el número d'estudi per comparar-les, el SMD creix en general i moltes variables passen a ser no comparables entre grups i estudis. 
+
+**Supòsit A**
+
+Sota el supòosit A tots els estudis del meta-anàlisi són assaigs clínics. 
+Això vol dir que els estudis tenen un mostreig aleatori i, per tant, les possibles variables confusores estan neutralitzades pel factor aleatòri.
+Al ser un assaigs clínics podem fer l'anàlisi del HR (hazard ratio) més fàcil, ja que en el model de Cox no hem d’incloure covariables, només el tractament.
+
+**Supòsit B**
+
+
+## Meta-analisis sobre el supòsit A
+
+*Primer pas*
+Analizem cada estudi per separat, obtenim com a resultat l’estimador (ln (HR)) i l’error estàndard (ee(ln (HR))).
+
+Pasem la variable tractament a factor
+```{r}
+treatment_f=factor(datos$treatment,levels=c(1,2),labels = c("cas","control"))
+datos$study_num=as.factor(datos$study_num)
+
+datos = cbind(datos,treatment_f)
+
+library("survival")
+library("survminer")
+```
+
+#### Variable mort
+```{r}
+HR<-coxph(Surv(EP_DeathTime,as.numeric(EP_DeathYN)) ~ treatment_f*strata(study_num), data = datos)
+sum=summary(HR)
+
+#estimador
+lnHR_mort<-unname(HR$coefficients)
+
+#error estandard  
+EElnHR_mort<-unname(sum$coefficients[,3])
+```
+
+#### Variable OLT
+```{r}
+#1)
+HR<-coxph(Surv(OLT_Time,as.numeric(OLT_THYN)) ~ treatment_f*strata(study_num), data = datos)
+sum=summary(HR)
+
+#estimador
+lnHR_olt<-unname(HR$coefficients)
+
+#error estandard  
+EElnHR_olt<-unname(sum$coefficients[,3])
+```
+
+#### Variable EP
+```{r}
+#1)
+HR<-coxph(Surv(EP_HRVaricesTime,as.numeric(EP_HDAvariceal)) ~ treatment_f*strata(study_num), data = datos)
+sum=summary(HR)
+
+#estimador
+lnHR_ep<-unname(HR$coefficients)
+
+#error estandard  
+EElnHR_ep<-unname(sum$coefficients[,3])
+```
+
+*Segon pas*
+
+Ara hem de calcular l’estimador resum de tots els estudis, la significació estadística i resultats d’heterogeneïtat.
+
+En aquest cas utilitzarem la ponderació per l’invers de la variància.
+1/ee(ln (HRi))^2
+
+Ara, tenint en compte els pesos, podem calcular, Hazard Ratio (HR) i error estàndard de l'estimador.
+
+L’estimació dels pesos fet anteriorment és en el cas de efectes fixes. Si volem aplicar el mètode d’efectes aleatòris l’estimació dels pesos és una mica diferent.
+
+Per fer aquest segon pas de mètodes aleatoris utilitzarem la funcio metagen de la llibreria meta de R. 
+
+La millor manera de resumir el resultats és mitjançant el forest plot, on mirem com és l’estimador resum i si és significatiu o no.
+
+#### Variable mort
+```{r}
+library(meta)
+studies = unique(datos$study_num)
+
+# Efectes fixos
+pooled1<-metagen(TE=lnHR_mort , seTE= EElnHR_mort, studlab= studies, data=HR, sm="HR", comb.fixed = TRUE, comb.random = FALSE ,method.tau = "REML")
+forest(pooled1)
+
+#Efectes aleatoris
+pooled2<-metagen(TE=lnHR_mort , seTE= EElnHR_mort, studlab= studies, data=HR, sm="HR",comb.fixed = FALSE, comb.random = TRUE,method.tau = "REML")
+forest(pooled2)
+```
+
+
+#### Variable OLT
+```{r}
+library(meta)
+studies = unique(datos$study_num)
+
+# Efectes fixos
+pooled1<-metagen(TE=lnHR_olt , seTE= EElnHR_olt, studlab= studies, data=HR, sm="HR", comb.fixed = TRUE, comb.random = FALSE ,method.tau = "REML")
+forest(pooled1)
+
+#Efectes aleatoris
+pooled2<-metagen(TE=lnHR_olt , seTE= EElnHR_olt , studlab= studies, data=HR, sm="HR",comb.fixed = FALSE, comb.random = TRUE,method.tau = "REML")
+forest(pooled2)
+```
+
+
+#### Variable EP
+```{r}
+library(meta)
+studies = unique(datos$study_num)
+
+# Efectes fixos
+pooled1<-metagen(TE=lnHR_ep , seTE= EElnHR_ep, studlab= studies, data=HR, sm="HR", comb.fixed = TRUE, comb.random = FALSE ,method.tau = "REML")
+forest(pooled1)
+
+#Efectes aleatoris
+pooled2<-metagen(TE=lnHR_ep , seTE= EElnHR_ep, studlab= studies, data=HR, sm="HR",comb.fixed = FALSE, comb.random = TRUE,method.tau = "REML")
+forest(pooled2)
+```

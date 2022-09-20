@@ -1,0 +1,279 @@
+---
+title: "Pràctica 1"
+author: "Clara Albert"
+date: "25/3/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importació de les dades
+
+```{r}
+library(haven)
+demo=read_sas("uab_demo3.sas7bdat", NULL)
+
+drugs=read_sas("uab_drugs3.sas7bdat")
+
+atc=read_sas("uab_atc_drugs3.sas7bdat")
+
+datos=merge(demo,merge(drugs,atc,by=c("PatNo","ControlCas","MatchCC")), by=c("PatNo","ControlCas","MatchCC"))
+dim(datos)
+```
+
+## Passos inicials - Qualitat de les dades
+
+**Preparació de les dades**
+
+Hem de decidir si les variables són factors. Creem un vector amb arguments TRUE i FALSE per si la variable té menys de 5 possibles atributs. Aquelles que tinguin menys de 5 són les que convertirem a factor. NFractura i CountActualGE4 tot i que ens las converteixi a factor són variables numèriques i per tant les tornem a canviar manualment. La ADO_glitazonaDias tot i que tingui menys de 5 atributs és una variable numèrica, ja que ens dona els dies que ha estat prenent aquell medicament.
+
+```{r}
+cols.to.factor <- sapply(datos, function(col) length(unique(col)) < 5); head(cols.to.factor)
+datos[cols.to.factor] <- lapply(datos[ cols.to.factor] , factor)
+
+datos$NFractura = as.numeric(datos$NFractura)
+datos$CountActualGE4 = as.numeric(datos$CountActualGE4)
+datos$ADO_glitazonaDias = as.numeric(datos$ADO_glitazonaDias)
+
+str(datos)
+```
+
+A més a més, realitzem un summary per veure si hi ha alguna dada que no està preparada per l'anàlisi.
+```{r}
+summary(datos)
+```
+
+Veiem que totes les dades són vàlides i estan preparades. A més a més, les dades que són factors tenim que no hi ha cap nivell que no hagi d'estar. 
+
+**Missing values**
+
+```{r}
+apply(is.na(datos),2,sum)
+```
+
+Mirem quants valors falten per columna i veiem que les variables pes, talla i IMC són les úniques que tenen missings. 
+
+```{r}
+table(datos$ControlCas)
+
+par(mfrow=c(2,2))
+boxplot(datos$PES, main="Boxplot del pes")
+boxplot(datos$TALLA, main="Boxplot de la talla")
+boxplot(datos$Edat, main="Boxplot de l'edat")
+boxplot(datos$IMC, main="Boxplot de IMC")
+```
+
+## Anàlisi comparativa de les dades basals
+
+Per comparar els dos grups utilitzarem la funció compareGroups on les proves estadístiques que utilitzarem seran: 
+
+- Per a variables categòriques: N i percentatge
+
+- Per a variables numèriques: mediana i primer i tercer quartil
+
+A més a més, el mètode per obtenir el p-valor serà el 4 que fa un test de Shapiro-Wilks per decidir si la variable està distribuïda de forma normal o no. 
+
+```{r}
+library(compareGroups)
+tabla<-compareGroups(ControlCas~Edat+Sexe+PES+TALLA+IMC+ALCOHOL+Smoker+Artritis_reumatoide+Fractura+NFractura+Diabetis+tipus_diabetis+Densitometries+Osteporosi+neoplasia+HiperTiroidisme+Malnutricio+Malabsorcio+Malaltia_Hep_Cro+CountActualGE4+OthRiskFract,data = datos, include.miss = TRUE, method = 4, compute.prop = FALSE, compute.ratio = TRUE, chisq.test.perm = FALSE)
+(resultatstabla<-createTable(tabla,show.all = TRUE,show.n = TRUE))
+```
+
+**Identificació de les variables a usar en l'anàlisi interferencial**
+
+Al nostre model introduirem les variables que el seu p-valor sigui inferior a 0.05 i l'edat i el sexe tot i que no siguin significatives. En aquest cas són: Smoker, Fractura, NFractura, Diabetis, tipus_diabetis, Densitometries, Osteporosi, HiperTiroidisme i Malnutricio.
+
+Com Fractura i NFractures están molt correlacionades nomès introduirem Fractura. Pasa el mateix amb les variables Diabetis i tipus_diabetis, on en aquest cas tindrem en compte tipus_diabetis.
+
+
+## Anàlisi inferència de risc crus i ajustat
+
+El model que usarem serà un model de regressió logística condicional, ja que els controls i els casos estan aparellats per la variable MatchCC. Per tant, la nostra estratificació serà a partir de la variable MatchCC. 
+
+La variable resposta serà ControlCas.
+```{r}
+library(survival)
+library(Epi)
+```
+
+**Selecció de variables pel nostre model**
+Farem el model de regressió logística condicional amb les següents variables: Smoker, Fractura, tipus_diabetis, Densitometries, Osteporosi, HiperTiroidisme, Malnutricio, CountActualGE4, CortInh+CortSist, ADepreISRS, ADepreISRSDias, insulina, insulinaDias, H_SN, N_SN, N06A_SN, N06AA09_SN, N06AB03_SN, N06AB04_SN, N06AB05_SN, N06AB06_SN, N06AB10_SN, N06AX03_SN, N06AX05_SN, N06AX11_SN, N06AX16_SN.
+
+**Models crus**
+```{r}
+library(dplyr)
+subdata <- select(datos,Smoker,Fractura,tipus_diabetis,Densitometries,Osteporosi,HiperTiroidisme,Malnutricio,CountActualGE4,CortInh,CortSist,ADepreISRS,ADepreISRSDias,insulina,insulinaDias,H_SN,N_SN,N06A_SN,N06AA09_SN,N06AB03_SN,N06AB04_SN,N06AB05_SN,N06AB06_SN,N06AB10_SN,N06AX03_SN,N06AX05_SN,N06AX11_SN,N06AX16_SN)
+
+
+mods <- apply(subdata, 2, function(x) clogistic(ControlCas~x, strata=(MatchCC), data=datos))
+
+mods$insulinaDias <- clogistic(ControlCas~insulinaDias, strata=(MatchCC), data=datos)
+
+mods$ADepreISRSDias <- clogistic(ControlCas~ADepreISRSDias, strata=(MatchCC), data=datos)
+mods$Densitometries
+
+#Models no significatius: 
+#Densitometries, insulina, N06AA09_SN, N06AB05_SN, N06AX03_SN, N06AX11_SN, N06AX16_SN
+```
+
+```{r}
+#Calculem l'odds ratio 
+OR_cru <- sapply(mods, function (x) exp(as.numeric(x$coefficients)))
+OR_cru <- unlist(OR_cru)
+
+#Funció que calcula l'interval de confiança de l'OR
+fun_CI <- function(mod, level=0.95){
+  point <- as.numeric(mod$coefficients)
+  se <- sqrt(diag(mod$var))
+  alpha <- 1-level
+  z <- qnorm(1-alpha/2)
+  error <- se*z
+  CI <- c(point-error, point+error)
+  CI <- round(exp(CI),3)
+  if(length(CI)==2){
+    return(paste("(",CI[1] , ",", CI[2], ")"))
+  }
+  if(length(CI)==4){
+    return(list(paste("(",CI[1] , ",", CI[3], ")"),
+    paste("(",CI[2] , ",", CI[4], ")")))
+  }
+}
+
+#Funcio per extreure p-valor
+#library(utils)
+#pval <- function(mod){
+#  strsplit(capture.output(mod)[9], " ")[[1]][14]
+#}
+
+#pvalors <- sapply(mods, pval)
+#pvalors
+
+
+CI_cru <- sapply(mods, fun_CI)
+CI_cru <- unlist(CI_cru)
+```
+
+
+
+**Model ajustat**
+Per saber quines variables afegim al nostre model ajustat mirem la taula descriptiva entre els dos grups i afegim aquelles variables que hi hagi més diferència entre els dos grups. En el nostre cas, aquestes variables són: Fractura, osteporosi i ContActualGE4 (aquelles variables que el p-valor és més petit que 0.001) tot i que per fer el model ajustat només introduim Fractura i Osteporosi.
+
+```{r}
+#Aplicam el model ajustat amb fractura i osteporosi a totes les variables
+mods_adj <- apply(subdata, 2, function(x) clogistic(ControlCas~x + Fractura + Osteporosi, strata=(MatchCC), data=datos))
+
+#Per fractura i osteporosi només necessitem les dos variables regressores
+mods_adj$Fractura <- clogistic(ControlCas~Fractura + Osteporosi, strata=(MatchCC), data=datos)
+
+mods_adj$Osteporosi <- clogistic(ControlCas~Osteporosi+Fractura, strata(MatchCC), data=datos)
+
+#Per insulinaDias i ADepreISRSDias no s'ajusta correctament amb el procediment anterior i per això els ajustam per separat. 
+mods_adj$insulinaDias <- clogistic(ControlCas~insulinaDias + Fractura + Osteporosi, strata=(MatchCC), data=datos)
+
+mods_adj$ADepreISRSDias <- clogistic(ControlCas~ADepreISRSDias + Fractura + Osteporosi, strata=(MatchCC), data=datos)
+
+# Densitometries No significatiu
+```
+
+Mirem els OR del model ajustat
+```{r}
+#funció per calcular l'OR dels models sense tenir en compte els coeficients de Fractura i Osteporosi de tots els models
+fun_OR <- function (x) {
+  a <- length(x$coefficients)
+  exp(as.numeric(x$coefficients[-((a-1):a)]))
+}
+
+#Funció que calcula l'interval de confiança de l'OR
+fun_CI_adj <- function(mod, level=0.95){
+  a <- length(mod$coefficients)
+  point <- as.numeric(mod$coefficients[-((a-1):a)])
+  se <- sqrt(diag(mod$var)[-((a-1):a)])
+  alpha <- 1-level
+  z <- qnorm(1-alpha/2)
+  error <- se*z
+  CI <- c(point-error, point+error)
+  CI <- round(exp(CI),3)
+    if(length(CI)==2){
+    return(paste("(",CI[1] , ",", CI[2], ")"))
+  }
+  if(length(CI)==4){
+    return(list(paste("(",CI[1] , ",", CI[3], ")"),
+    paste("(",CI[2] , ",", CI[4], ")")))
+  }
+}
+
+
+#Aplicam la funcio per calcular OR a cada model ajustat
+OR_adj <- sapply(mods_adj, fun_OR)
+#Calculam les OR per el model amb només Fractura i Osteporosi com a regressores(el tractament es diferent als altres)
+OR_adj$Fractura <- exp(as.numeric(mods_adj$Fractura$coefficients[1]))
+OR_adj$Osteporosi <- exp(as.numeric(mods_adj$Osteporosi$coefficients[1]))
+
+#Convertim els resultats a vector
+OR_adj <- unlist(OR_adj)
+
+#Aplicam la funcio de l'interval de confiança a cada model ajustat
+CI_adj <- sapply(mods_adj, fun_CI_adj)
+#Fractura i Osteporosi tenen un tractament diferent al que es fa a la funció
+CI_adj$Fractura <- fun_CI(mods_adj$Fractura)[1]
+CI_adj$Osteporosi <- fun_CI(mods_adj$Osteporosi)[1]
+#convertim l'objecte creat a vector
+CI_adj <- unlist(CI_adj)
+```
+
+
+```{r}
+#length(names)
+#length(OR_cru)
+#length(OR_adj)
+#length(CI_cru)
+#length(CI_adj)
+
+taula.final=data.frame("OR cru"=round(OR_cru, 3),"CI OR cru"=CI_cru,"OR adj"=round(OR_adj, 3), "CI OR adj"=CI_adj)
+
+data.frame("OR adj"=round(OR_adj, 3),"CI OR adj"=CI_adj)
+taula.final
+```
+
+
+**Compararació de les variables amb les de l'article**
+Tots els OR crus són practicament iguals amb els de l'article. Els que més difereix és Paroxetine, però per 0,2. En canvi, l'odds ratio pel model ajustat si que hi ha més diferencies, ja que les variables escollides per ajustar són diferents. El que més difereix són els Antidepressants i Escitalopram amb una diferència d'1,5. 
+
+**Factors de confusió**
+Per saber si hi ha factors de confusió hem de comparar els OR del model cru amb el model ajustat. Si el canvi hi ha més del 20% de diferència, aproximadament, les variables introduïdes (Fractura i Osteporosi) estan actuant com a factors de confusió.
+
+
+## Re-disseny de l'estudi
+
+**Que hem après**
+De la primera part de la pràctica, a tractar les dades faltants i com d'important són el sexe i l'edat en l'estudi cas-control. A més a més, a fer el preprocessing de les dades i fer un anàlisi descriptiu diferenciant els grups amb la funció `compareGroups()`. A partir d'aquest anàlisi, hem pogut realitzar una selecció de les variables més interessants per fer el model posteriorment.
+
+Les dades, al tractar-se de un cas real, ens han donat una visió de com s'analitzen en la realitat. 
+
+Mai haviem utilitzat un model de regressió logística condicional i per tant hem après a utilitzar la funció `clogistic` i fer una comparativa entre el model cru i ajustat a partir dels odds ratio. Per tant, hem sabut si hi ha factors de confusió. 
+
+**Que no faríeu**
+Estudiar la incidencia, la prevalença i els riscos relatius en un disseny cas-control. 
+
+Seleccionar els controls de l'hospital.
+
+Al tractar-se de dades que no sabem la seva distribució no podem deduir que es tracten de dades distribuides amb una normal, per tant, quan calculem els seus p-valors a l'anàlisi descriptiva a partir del test Mann-Whitney per a variables contínues i test de Fisher per variables categòriques. 
+
+
+```{r}
+attach(datos)
+tab<-table(Sexe,Fractura)
+tab
+fisher.test(tab)
+#odds ratio del nostre model és 0.8053549
+
+ad<-tab[1,1]*tab[2,2]
+bc<-tab[1,2]*tab[2,1]
+oddsratio<-ad/bc; oddsratio
+```
+Per tant el que podem obsevar és que per obtenir un $OR>=2.42$, la grandaria que necessitem per a la nostra mostra és que $a*d$ sigui major o igual a 303 aproximadament, o que $c*b$  sigui més petit o igual que 1954 aproximadament.
+
